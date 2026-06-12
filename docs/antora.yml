@@ -1,0 +1,5 @@
+name: quarkus-idempotency
+title: Quarkus Idempotency
+version: ~
+nav:
+  - modules/ROOT/nav.adoc

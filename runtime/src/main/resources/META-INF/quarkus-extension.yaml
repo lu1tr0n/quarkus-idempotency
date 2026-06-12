@@ -1,0 +1,12 @@
+name: Quarkus Idempotency
+description: HTTP idempotency keys for safe retries via the Idempotency-Key header
+metadata:
+  keywords:
+    - idempotency
+    - idempotency-key
+    - http
+  categories:
+    - web
+  status:
+    - experimental
+  guide: https://github.com/quarkiverse/quarkus-idempotency
