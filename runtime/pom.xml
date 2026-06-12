@@ -27,6 +27,13 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest</artifactId>
         </dependency>
+        <!-- RFC 9457 problem+json rendering for the rejection responses. Requires a JSON provider
+             (quarkus-rest-jackson or quarkus-rest-jsonb) in the consuming application. -->
+        <dependency>
+            <groupId>io.quarkiverse.httpproblem</groupId>
+            <artifactId>quarkus-http-problem</artifactId>
+            <version>${http-problem.version}</version>
+        </dependency>
         <!-- Bounded in-memory store (size + TTL eviction); native support comes from this extension. -->
         <dependency>
             <groupId>io.quarkus</groupId>

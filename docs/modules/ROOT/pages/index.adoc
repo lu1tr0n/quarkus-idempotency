@@ -23,8 +23,10 @@ Add the dependency to your `pom.xml`:
 </dependency>
 ----
 
-That is all that is required. With the extension on the classpath, any `POST` or `PATCH` request
-that carries an `Idempotency-Key` header is handled idempotently.
+With the extension on the classpath, any `POST` or `PATCH` request that carries an `Idempotency-Key`
+header is handled idempotently. The extension renders its error responses via `quarkus-http-problem`,
+so your application also needs a JSON provider — add `quarkus-rest-jackson` (or `quarkus-rest-jsonb`)
+if it does not have one already.
 
 == Getting started
 
@@ -101,8 +103,9 @@ composite (per-caller) cache key, and the documented expiry policy are all what 
 [[errors]]
 == Error responses
 
-Every rejection is returned as an RFC 9457 (`application/problem+json`) document, with a `type` URI
-and an equivalent `Link` header pointing to the relevant documentation, as the draft recommends:
+Rejections are rendered as RFC 9457 (`application/problem+json`) documents by the
+https://docs.quarkiverse.io/quarkus-http-problem/dev/[`quarkus-http-problem`] extension. The `type`
+URI points to the relevant documentation, as the draft recommends:
 
 [source,json]
 ----
@@ -110,9 +113,16 @@ and an equivalent `Link` header pointing to the relevant documentation, as the d
   "type": "https://docs.quarkiverse.io/quarkus-idempotency/dev/#idempotency-key-mismatch",
   "title": "Idempotency-Key reused with a different payload",
   "status": 422,
-  "detail": "The Idempotency-Key was already used for a request with a different method, path, query, or body."
+  "detail": "The Idempotency-Key was already used for a request with a different method, path, query, or body.",
+  "instance": "/orders"
 }
 ----
+
+[NOTE]
+====
+Rendering uses `quarkus-http-problem`, which requires a JSON provider on the classpath — add
+`quarkus-rest-jackson` (or `quarkus-rest-jsonb`) to your application.
+====
 
 The `type` base is configurable with `quarkus.idempotency.problem-base-uri`. The problem types are:
 

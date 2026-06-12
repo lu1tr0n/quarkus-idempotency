@@ -1,5 +1,6 @@
 package io.quarkiverse.idempotency.runtime;
 
+import java.net.URI;
 import java.security.Principal;
 
 import jakarta.annotation.Priority;
@@ -13,6 +14,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.SecurityContext;
 import jakarta.ws.rs.ext.Provider;
 
+import io.quarkiverse.httpproblem.HttpProblem;
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.Reservation;
 import io.quarkiverse.idempotency.runtime.spi.StoredEntry;
@@ -70,7 +72,7 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
         String rawKey = requestContext.getHeaderString(config.headerName());
         if (rawKey == null || rawKey.isBlank()) {
             if (config.requireKey()) {
-                problem(requestContext, 400, "idempotency-key-required", "Idempotency-Key required",
+                throw problem(400, "idempotency-key-required", "Idempotency-Key required",
                         "This endpoint requires a " + config.headerName() + " header.");
             }
             return;
@@ -78,16 +80,14 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
 
         String key = unquote(rawKey.trim());
         if (key.isEmpty() || key.length() > config.maxKeyLength() || hasControlChars(key)) {
-            problem(requestContext, 400, "idempotency-key-invalid", "Invalid Idempotency-Key",
+            throw problem(400, "idempotency-key-invalid", "Invalid Idempotency-Key",
                     "The " + config.headerName() + " header is empty, too long, or contains control characters.");
-            return;
         }
 
         String principal = principalName(requestContext.getSecurityContext());
         if (config.requireIdentity() && principal.isEmpty()) {
-            problem(requestContext, 401, "authentication-required", "Authentication required",
+            throw problem(401, "authentication-required", "Authentication required",
                     "An authenticated identity is required to use " + config.headerName() + ".");
-            return;
         }
         String scope = scopeValue(requestContext);
         String storageKey = StorageKey.derive(principal, scope, key);
@@ -106,16 +106,15 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
 
         StoredEntry entry = ((Reservation.Existing) reservation).entry();
         if (config.fingerprintEnabled() && !entry.fingerprint().equals(fingerprint)) {
-            problem(requestContext, UNPROCESSABLE_ENTITY, "idempotency-key-mismatch",
+            throw problem(UNPROCESSABLE_ENTITY, "idempotency-key-mismatch",
                     "Idempotency-Key reused with a different payload",
                     "The " + config.headerName() + " was already used for a request with a different "
                             + "method, path, query, or body.");
         } else if (entry.inFlight()) {
-            problem(requestContext, 409, "idempotency-key-conflict", "Request already in progress",
+            throw problem(409, "idempotency-key-conflict", "Request already in progress",
                     "A request with this " + config.headerName() + " is still being processed.");
-        } else {
-            requestContext.abortWith(buildReplay(entry.response()));
         }
+        requestContext.abortWith(buildReplay(entry.response()));
     }
 
     private String scopeValue(ContainerRequestContext ctx) {
@@ -163,8 +162,26 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
         return rb.build();
     }
 
-    private void problem(ContainerRequestContext ctx, int status, String slug, String title, String detail) {
-        ctx.abortWith(ProblemResponse.of(status, slug, title, detail, config.problemBaseUri()));
+    /**
+     * Builds an RFC 9457 problem for a rejection. Thrown (not aborted) so the quarkus-http-problem
+     * mapper renders it as {@code application/problem+json}; the {@code type} URI points at the
+     * relevant documentation, as the Idempotency-Key draft recommends.
+     */
+    private HttpProblem problem(int status, String slug, String title, String detail) {
+        return HttpProblem.builder()
+                .withType(URI.create(typeUri(slug)))
+                .withTitle(title)
+                .withStatus(status)
+                .withDetail(detail)
+                .build();
+    }
+
+    private String typeUri(String slug) {
+        String base = config.problemBaseUri();
+        if (base == null || base.isBlank()) {
+            return "urn:quarkus-idempotency:" + slug;
+        }
+        return base + (base.contains("#") ? "-" : "#") + slug;
     }
 
     private static boolean hasControlChars(String value) {

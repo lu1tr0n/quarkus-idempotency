@@ -1,7 +1,6 @@
 package io.quarkiverse.idempotency.test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -12,9 +11,9 @@ import io.quarkus.test.QuarkusUnitTest;
 import io.restassured.http.Header;
 
 /**
- * RFC 9457 (problem+json) compliance: every idempotency rejection returns
- * {@code application/problem+json} with a {@code type} URI, {@code title}, {@code status}, and a
- * {@code Link} header pointing to the documentation — as the Idempotency-Key draft recommends.
+ * RFC 9457 (problem+json) compliance: every idempotency rejection is rendered by the
+ * quarkus-http-problem extension as {@code application/problem+json} with a {@code type} URI
+ * pointing to the documentation, plus {@code title} and {@code status}.
  */
 public class ProblemDetailTest {
 
@@ -32,7 +31,6 @@ public class ProblemDetailTest {
                 .when().post("/payments/charge")
                 .then().statusCode(400)
                 .contentType("application/problem+json")
-                .header("Link", containsString("https://example.test/docs#idempotency-key-required"))
                 .body("type", equalTo("https://example.test/docs#idempotency-key-required"))
                 .body("title", equalTo("Idempotency-Key required"))
                 .body("status", equalTo(400));
