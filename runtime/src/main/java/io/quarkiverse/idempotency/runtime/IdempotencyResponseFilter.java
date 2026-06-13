@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Flow;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -11,23 +12,35 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.ext.Provider;
 
 import org.jboss.logging.Logger;
 
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.StoredResponse;
-import io.smallrye.common.annotation.Blocking;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.smallrye.mutiny.Uni;
+import io.vertx.ext.web.RoutingContext;
 
 /**
- * Captures the response of a request that reserved an idempotency key and stores it for replay.
- * Requests that only replayed, passed through, or were rejected carry no active key and are
- * ignored. A 5xx response releases the key (unless configured otherwise) so the client can retry.
+ * Captures the response of a request that reserved an idempotency key and stores it for replay. The
+ * store write is reactive and fired without blocking the response (the reservation already protects
+ * concurrent retries). The active key and fingerprint are read from the Vert.x
+ * {@link RoutingContext}; this filter sets {@link IdempotencyRequestFilter#HANDLED_ATTR} so the
+ * request filter's end-handler safety net knows completion was handled here.
+ *
+ * <ul>
+ * <li>5xx (when not cached) releases the key so the client can retry.</li>
+ * <li>Streaming responses are released by the request filter's end-handler (they bypass this filter);
+ * a defensive check here also releases if a streaming entity is ever observed.</li>
+ * <li>Responses larger than {@code max-stored-body} are not stored (key released).</li>
+ * </ul>
  *
  * <p>
  * Only headers on the configured allow-list are captured, and a hard deny-list of credential-bearing
  * headers is enforced unconditionally so a stored response can never replay another caller's secrets.
- * Responses larger than {@code max-stored-body} are not stored (the key is released).
  */
 @Provider
 @ApplicationScoped
@@ -51,19 +64,31 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
     Instance<IdempotencyStore> store;
 
     @Inject
-    IdempotencyRequestState state;
+    CurrentVertxRequest currentRequest;
 
     @Override
-    @Blocking
     public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
-        String key = state.getActiveKey();
+        RoutingContext rc = currentRequest.getCurrent();
+        if (rc == null) {
+            return;
+        }
+        String key = (String) rc.get(IdempotencyRequestFilter.KEY_ATTR);
         if (key == null) {
             return;
         }
+        // Tell the request filter's end-handler that completion was handled here (not a stream).
+        rc.put(IdempotencyRequestFilter.HANDLED_ATTR, Boolean.TRUE);
+        String fingerprint = (String) rc.get(IdempotencyRequestFilter.FINGERPRINT_ATTR);
 
         int status = responseContext.getStatus();
         if (status >= 500 && !config.cacheErrorResponses()) {
-            store.get().release(key);
+            fire(store.get().release(key));
+            return;
+        }
+
+        if (isStreaming(responseContext)) {
+            LOG.debug("Streaming response on an idempotent request; not caching (key released)");
+            fire(store.get().release(key));
             return;
         }
 
@@ -73,20 +98,39 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
             if (size != null && size > limit) {
                 LOG.debugf("Response body (%s bytes) exceeds max-stored-body (%s); not caching",
                         size, Long.valueOf(limit));
-                store.get().release(key);
+                fire(store.get().release(key));
                 return;
             }
         }
 
         Map<String, String> headers = capturedHeaders(responseContext);
-
         String mediaType = responseContext.getMediaType() != null
                 ? responseContext.getMediaType().toString()
                 : null;
 
-        store.get().complete(key, state.getFingerprint(),
+        fire(store.get().complete(key, fingerprint,
                 new StoredResponse(status, headers, responseContext.getEntity(), mediaType),
-                config.responseTtl());
+                config.responseTtl()));
+    }
+
+    /**
+     * Subscribe to the reactive store write without blocking the response. The reservation made at
+     * acquire time already guards concurrent retries, so the write does not need to complete before
+     * the response is sent; failures are logged.
+     */
+    private void fire(Uni<Void> write) {
+        write.subscribe().with(ignored -> {
+        }, failure -> LOG.error("Failed to persist idempotency state", failure));
+    }
+
+    /** A streamed body cannot be buffered for replay (reactive publisher, SSE, or StreamingOutput). */
+    private static boolean isStreaming(ContainerResponseContext responseContext) {
+        MediaType mt = responseContext.getMediaType();
+        if (mt != null && "text".equalsIgnoreCase(mt.getType()) && "event-stream".equalsIgnoreCase(mt.getSubtype())) {
+            return true;
+        }
+        Object entity = responseContext.getEntity();
+        return entity instanceof Flow.Publisher || entity instanceof StreamingOutput;
     }
 
     private Map<String, String> capturedHeaders(ContainerResponseContext responseContext) {

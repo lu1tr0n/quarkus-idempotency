@@ -9,6 +9,9 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 
+import org.jboss.resteasy.reactive.RestStreamElementType;
+
+import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.Uni;
 
 /**
@@ -37,6 +40,17 @@ public class PaymentResource {
     public Uni<String> chargeReactive(String body) {
         int n = EXECUTIONS.incrementAndGet();
         return Uni.createFrom().item("charged#" + n + ":" + body.length());
+    }
+
+    /** Streaming (Multi) variant — its response cannot be captured, so it must not be made idempotent. */
+    @POST
+    @Path("/charge-stream")
+    @Consumes(MediaType.APPLICATION_JSON)
+    @Produces(MediaType.APPLICATION_JSON)
+    @RestStreamElementType(MediaType.TEXT_PLAIN)
+    public Multi<String> chargeStream(String body) {
+        int n = EXECUTIONS.incrementAndGet();
+        return Multi.createFrom().items("a" + n, "b" + n);
     }
 
     @GET

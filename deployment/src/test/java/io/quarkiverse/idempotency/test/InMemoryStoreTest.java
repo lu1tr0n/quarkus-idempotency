@@ -21,12 +21,16 @@ class InMemoryStoreTest {
     private static final Duration LOCK = Duration.ofSeconds(60);
     private static final Duration TTL = Duration.ofHours(24);
 
+    private static Reservation acquire(InMemoryIdempotencyStore store, String key, String fp, Duration ttl) {
+        return store.acquire(key, fp, ttl).await().indefinitely();
+    }
+
     @Test
     void firstAcquireWinsSecondSeesInFlight() {
         InMemoryIdempotencyStore store = new InMemoryIdempotencyStore(1000L);
-        assertInstanceOf(Reservation.Acquired.class, store.acquire("k", "fp", LOCK));
+        assertInstanceOf(Reservation.Acquired.class, acquire(store, "k", "fp", LOCK));
 
-        Reservation second = store.acquire("k", "fp", LOCK);
+        Reservation second = acquire(store, "k", "fp", LOCK);
         StoredEntry entry = assertInstanceOf(Reservation.Existing.class, second).entry();
         assertTrue(entry.inFlight(), "second concurrent caller must observe the in-flight reservation (→ 409)");
     }
@@ -34,10 +38,11 @@ class InMemoryStoreTest {
     @Test
     void completeMakesEntryReplayable() {
         InMemoryIdempotencyStore store = new InMemoryIdempotencyStore(1000L);
-        store.acquire("k", "fp", LOCK);
-        store.complete("k", "fp", new StoredResponse(201, Map.of("Location", "/r/1"), "ok", "text/plain"), TTL);
+        acquire(store, "k", "fp", LOCK);
+        store.complete("k", "fp", new StoredResponse(201, Map.of("Location", "/r/1"), "ok", "text/plain"), TTL)
+                .await().indefinitely();
 
-        StoredEntry entry = assertInstanceOf(Reservation.Existing.class, store.acquire("k", "fp", LOCK)).entry();
+        StoredEntry entry = assertInstanceOf(Reservation.Existing.class, acquire(store, "k", "fp", LOCK)).entry();
         assertFalse(entry.inFlight());
         assertEquals(201, entry.response().status());
         assertEquals("ok", entry.response().entity());
@@ -47,16 +52,16 @@ class InMemoryStoreTest {
     @Test
     void releaseAllowsReacquire() {
         InMemoryIdempotencyStore store = new InMemoryIdempotencyStore(1000L);
-        store.acquire("k", "fp", LOCK);
-        store.release("k");
-        assertInstanceOf(Reservation.Acquired.class, store.acquire("k", "fp", LOCK));
+        acquire(store, "k", "fp", LOCK);
+        store.release("k").await().indefinitely();
+        assertInstanceOf(Reservation.Acquired.class, acquire(store, "k", "fp", LOCK));
     }
 
     @Test
     void expiredReservationCanBeReacquired() throws InterruptedException {
         InMemoryIdempotencyStore store = new InMemoryIdempotencyStore(1000L);
-        store.acquire("k", "fp", Duration.ofMillis(1));
+        acquire(store, "k", "fp", Duration.ofMillis(1));
         Thread.sleep(15);
-        assertInstanceOf(Reservation.Acquired.class, store.acquire("k", "fp", LOCK));
+        assertInstanceOf(Reservation.Acquired.class, acquire(store, "k", "fp", LOCK));
     }
 }

@@ -95,6 +95,14 @@ caller and can never be served to another — see <<security>>.
 By default only `POST` and `PATCH` are guarded — replaying a stored response for a safe or
 naturally idempotent method (`GET`, `PUT`, `DELETE`) would mask fresh data.
 
+=== Async and streaming endpoints
+
+The store lookup is non-blocking, so guarded endpoints may return synchronous values, `Uni`, or
+`CompletionStage` — including with the Redis store — without blocking the event loop. **Streaming**
+responses (`Multi`, Server-Sent Events, `StreamingOutput`) cannot be buffered for replay, so they are
+intentionally *not* made idempotent: the key is released when the response completes and a retry
+re-executes the operation. Do not rely on `Idempotency-Key` for streaming endpoints.
+
 This behavior follows the IETF
 https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header[Idempotency-Key
 header draft] (the Stripe pattern): the `409`/`422`/`400` status codes, the payload fingerprint, the
@@ -279,8 +287,8 @@ original request is still running.
 fingerprinted without a blocking read on reactive endpoints. Bound request size with
 `quarkus.http.limits.max-body-size`, or set `quarkus.idempotency.buffer-request-body=false` if you
 do not need body fingerprinting.
-* Responses are captured as the response entity; very large or streamed responses are best left
-unguarded (`max-stored-body`).
+* Responses are captured as the response entity, bounded by `max-stored-body`. Streaming responses
+(`Multi`/SSE/`StreamingOutput`) are not cached — they pass through and re-execute on retry.
 * The in-memory store is per-instance — use the Redis store for clustered deployments.
 
 [[extension-configuration-reference]]

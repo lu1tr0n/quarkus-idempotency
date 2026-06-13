@@ -2,7 +2,6 @@ package io.quarkiverse.idempotency.deployment;
 
 import io.quarkiverse.idempotency.runtime.IdempotencyConfig;
 import io.quarkiverse.idempotency.runtime.IdempotencyRequestFilter;
-import io.quarkiverse.idempotency.runtime.IdempotencyRequestState;
 import io.quarkiverse.idempotency.runtime.IdempotencyResponseFilter;
 import io.quarkiverse.idempotency.runtime.IdempotencyStartup;
 import io.quarkiverse.idempotency.runtime.store.InMemoryIdempotencyStore;
@@ -55,7 +54,6 @@ class IdempotencyProcessor {
     @BuildStep
     void beans(BuildProducer<AdditionalBeanBuildItem> beans) {
         AdditionalBeanBuildItem.Builder builder = AdditionalBeanBuildItem.builder()
-                .addBeanClass(IdempotencyRequestState.class)
                 .addBeanClass(IdempotencyStartup.class)
                 .addBeanClass(InMemoryIdempotencyStore.class);
 

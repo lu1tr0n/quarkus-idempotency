@@ -14,20 +14,32 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.SecurityContext;
 import jakarta.ws.rs.ext.Provider;
 
+import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
+
 import io.quarkiverse.httpproblem.HttpProblem;
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.Reservation;
 import io.quarkiverse.idempotency.runtime.spi.StoredEntry;
 import io.quarkiverse.idempotency.runtime.spi.StoredResponse;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
-import io.smallrye.common.annotation.Blocking;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.ext.web.RequestBody;
 import io.vertx.ext.web.RoutingContext;
 
 /**
  * Resolves idempotency for guarded requests carrying the configured key header. Runs after
- * authentication so the request's identity is known and the stored key is scoped to it.
+ * authentication. Synchronous validation (missing/invalid key, anonymous) aborts immediately; the
+ * store lookup is asynchronous — the request is {@code suspend()}ed and {@code resume()}d on the
+ * reactive store result, so this works on reactive endpoints ({@code Uni}/{@code Multi}) without
+ * blocking the event loop.
+ *
+ * <p>
+ * The reservation and the resolved fingerprint travel on the Vert.x {@link RoutingContext} (rather
+ * than a CDI request-scoped bean) so they are reliably visible across the async store callback and
+ * the response path. A response end-handler is the safety net for streaming responses: those bypass
+ * the {@link IdempotencyResponseFilter}, so the handler releases the still-in-flight key on response
+ * completion — a streamed body cannot be captured/replayed, so the request is not made idempotent.
  *
  * <ul>
  * <li>New key — reserve it and let the request proceed (the response filter stores the result).</li>
@@ -37,11 +49,6 @@ import io.vertx.ext.web.RoutingContext;
  * <li>Required key missing/invalid — 400 Bad Request.</li>
  * <li>Identity required but request is anonymous — 401 Unauthorized.</li>
  * </ul>
- *
- * <p>
- * The store key is never the raw client header: it is {@code sha256(principal ⌷ scope ⌷ rawKey)}
- * (see {@link StorageKey}), so one caller can never be served another caller's response, even when
- * idempotency keys are predictable/meaningful.
  */
 @Provider
 @Priority(Priorities.HEADER_DECORATOR)
@@ -50,6 +57,15 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
 
     static final int UNPROCESSABLE_ENTITY = 422;
 
+    /** RoutingContext attribute holding the active (acquired) storage key for the response path. */
+    static final String KEY_ATTR = "io.quarkiverse.idempotency.key";
+    /** RoutingContext attribute holding the request fingerprint for the response path. */
+    static final String FINGERPRINT_ATTR = "io.quarkiverse.idempotency.fingerprint";
+    /** RoutingContext attribute set once the response filter has handled completion. */
+    static final String HANDLED_ATTR = "io.quarkiverse.idempotency.handled";
+
+    private static final Logger LOG = Logger.getLogger(IdempotencyRequestFilter.class);
+
     @Inject
     IdempotencyConfig config;
 
@@ -57,13 +73,9 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
     Instance<IdempotencyStore> store;
 
     @Inject
-    IdempotencyRequestState state;
-
-    @Inject
     CurrentVertxRequest currentRequest;
 
     @Override
-    @Blocking
     public void filter(ContainerRequestContext requestContext) {
         if (!config.enabled() || !config.methods().contains(requestContext.getMethod())) {
             return;
@@ -89,32 +101,75 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
             throw problem(401, "authentication-required", "Authentication required",
                     "An authenticated identity is required to use " + config.headerName() + ".");
         }
+
         String scope = scopeValue(requestContext);
         String storageKey = StorageKey.derive(principal, scope, key);
-
         String fingerprint = config.fingerprintEnabled()
                 ? Fingerprint.compute(requestContext.getMethod(), requestContext.getUriInfo().getPath(),
                         rawQuery(requestContext), readBody(), config.maxFingerprintBody().asLongValue())
                 : "";
 
-        Reservation reservation = store.get().acquire(storageKey, fingerprint, config.lockTtl());
-        if (reservation instanceof Reservation.Acquired) {
-            state.setActiveKey(storageKey);
-            state.setFingerprint(fingerprint);
+        RoutingContext rc = currentRequest.getCurrent();
+        registerStreamingSafetyNet(rc);
+
+        // Asynchronous store lookup: suspend the request and resume on the reactive result.
+        ResteasyReactiveContainerRequestContext rrCtx = (ResteasyReactiveContainerRequestContext) requestContext;
+        rrCtx.suspend();
+        store.get().acquire(storageKey, fingerprint, config.lockTtl()).subscribe().with(
+                reservation -> {
+                    try {
+                        Response replay = onReservation(reservation, storageKey, fingerprint, rc);
+                        if (replay != null) {
+                            requestContext.abortWith(replay);
+                        }
+                        rrCtx.resume();
+                    } catch (RuntimeException problem) {
+                        rrCtx.resume(problem);
+                    }
+                },
+                failure -> rrCtx.resume(failure));
+    }
+
+    /**
+     * Releases the key when the response completes without the response filter having handled it —
+     * i.e. streaming responses, which bypass {@link IdempotencyResponseFilter}. For normal responses
+     * the response filter sets {@link #HANDLED_ATTR} and this no-ops.
+     */
+    private void registerStreamingSafetyNet(RoutingContext rc) {
+        if (rc == null) {
             return;
         }
+        rc.addEndHandler(ar -> {
+            Object activeKey = rc.get(KEY_ATTR);
+            if (activeKey != null && rc.get(HANDLED_ATTR) == null) {
+                LOG.debug("Response completed without capture (streaming?); releasing idempotency key");
+                store.get().release((String) activeKey).subscribe().with(ignored -> {
+                }, t -> LOG.debug("Idempotency key release on response end failed", t));
+            }
+        });
+    }
 
+    /** @return a replay {@link Response}, or {@code null} to proceed; throws {@link HttpProblem} to reject. */
+    private Response onReservation(Reservation reservation, String storageKey, String fingerprint, RoutingContext rc) {
+        if (reservation instanceof Reservation.Acquired) {
+            if (rc != null) {
+                rc.put(KEY_ATTR, storageKey);
+                rc.put(FINGERPRINT_ATTR, fingerprint);
+            }
+            return null;
+        }
         StoredEntry entry = ((Reservation.Existing) reservation).entry();
         if (config.fingerprintEnabled() && !entry.fingerprint().equals(fingerprint)) {
             throw problem(UNPROCESSABLE_ENTITY, "idempotency-key-mismatch",
                     "Idempotency-Key reused with a different payload",
                     "The " + config.headerName() + " was already used for a request with a different "
                             + "method, path, query, or body.");
-        } else if (entry.inFlight()) {
+        }
+        if (entry.inFlight()) {
             throw problem(409, "idempotency-key-conflict", "Request already in progress",
                     "A request with this " + config.headerName() + " is still being processed.");
         }
-        requestContext.abortWith(buildReplay(entry.response()));
+        return buildReplay(entry.response());
     }
 
     private String scopeValue(ContainerRequestContext ctx) {
@@ -163,9 +218,8 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Builds an RFC 9457 problem for a rejection. Thrown (not aborted) so the quarkus-http-problem
-     * mapper renders it as {@code application/problem+json}; the {@code type} URI points at the
-     * relevant documentation, as the Idempotency-Key draft recommends.
+     * Builds an RFC 9457 problem for a rejection, rendered by the quarkus-http-problem mapper as
+     * {@code application/problem+json}; the {@code type} URI points at the relevant documentation.
      */
     private HttpProblem problem(int status, String slug, String title, String detail) {
         return HttpProblem.builder()

@@ -15,6 +15,7 @@ import io.quarkiverse.idempotency.runtime.spi.Reservation;
 import io.quarkiverse.idempotency.runtime.spi.StoredEntry;
 import io.quarkiverse.idempotency.runtime.spi.StoredResponse;
 import io.quarkus.arc.lookup.LookupIfProperty;
+import io.smallrye.mutiny.Uni;
 
 /**
  * Single-node, in-memory {@link IdempotencyStore} backed by a bounded Caffeine cache. Entries are
@@ -65,7 +66,9 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
     }
 
     @Override
-    public Reservation acquire(String key, String fingerprint, Duration lockTtl) {
+    public Uni<Reservation> acquire(String key, String fingerprint, Duration lockTtl) {
+        // Caffeine compute is non-blocking (in-memory, per-bin lock), so this runs safely on any
+        // thread; wrap the synchronous result in a completed Uni.
         boolean[] acquired = { false };
         Holder result = cache.asMap().compute(key, (k, existing) -> {
             if (existing != null) {
@@ -74,19 +77,22 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             acquired[0] = true;
             return new Holder(new StoredEntry(fingerprint, null), lockTtl.toNanos());
         });
-        return acquired[0]
+        Reservation reservation = acquired[0]
                 ? new Reservation.Acquired()
                 : new Reservation.Existing(result.entry());
+        return Uni.createFrom().item(reservation);
     }
 
     @Override
-    public void complete(String key, String fingerprint, StoredResponse response, Duration ttl) {
+    public Uni<Void> complete(String key, String fingerprint, StoredResponse response, Duration ttl) {
         cache.put(key, new Holder(new StoredEntry(fingerprint, response), ttl.toNanos()));
+        return Uni.createFrom().voidItem();
     }
 
     @Override
-    public void release(String key) {
+    public Uni<Void> release(String key) {
         cache.asMap().computeIfPresent(key, (k, existing) -> existing.entry().inFlight() ? null : existing);
+        return Uni.createFrom().voidItem();
     }
 
     /** Visible for testing: run pending maintenance and report the bounded entry count. */
