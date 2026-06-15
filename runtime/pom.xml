@@ -45,6 +45,13 @@
             <artifactId>quarkus-redis-client</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- Optional metrics: when present, idempotency outcomes are recorded via Micrometer. The
+             extension never forces it onto applications that don't want metrics. -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-micrometer</artifactId>
+            <optional>true</optional>
+        </dependency>
     </dependencies>
 
     <build>

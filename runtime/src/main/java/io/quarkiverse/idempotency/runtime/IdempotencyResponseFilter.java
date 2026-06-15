@@ -18,6 +18,7 @@ import jakarta.ws.rs.ext.Provider;
 
 import org.jboss.logging.Logger;
 
+import io.quarkiverse.idempotency.runtime.metrics.IdempotencyMetrics;
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.StoredResponse;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -66,6 +67,9 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
     @Inject
     CurrentVertxRequest currentRequest;
 
+    @Inject
+    IdempotencyMetrics metrics;
+
     @Override
     public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
         RoutingContext rc = currentRequest.getCurrent();
@@ -108,7 +112,7 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
                 ? responseContext.getMediaType().toString()
                 : null;
 
-        fire(store.get().complete(key, fingerprint,
+        fireComplete(key, store.get().complete(key, fingerprint,
                 new StoredResponse(status, headers, responseContext.getEntity(), mediaType),
                 config.responseTtl()));
     }
@@ -121,6 +125,21 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
     private void fire(Uni<Void> write) {
         write.subscribe().with(ignored -> {
         }, failure -> LOG.error("Failed to persist idempotency state", failure));
+    }
+
+    /**
+     * Persist the captured response. On success the response becomes replayable; on failure the
+     * in-flight reservation is released so a failed persist does not leave the key 409-blocking
+     * retries until the lock TTL expires.
+     */
+    private void fireComplete(String key, Uni<Void> write) {
+        write.subscribe().with(
+                ignored -> metrics.onStored(),
+                failure -> {
+                    LOG.error("Failed to persist idempotency state", failure);
+                    metrics.onStoreError();
+                    fire(store.get().release(key));
+                });
     }
 
     /** A streamed body cannot be buffered for replay (reactive publisher, SSE, or StreamingOutput). */

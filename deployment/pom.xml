@@ -58,6 +58,12 @@
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Exercises the Micrometer-backed metrics path (a real registry to read counters from). -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

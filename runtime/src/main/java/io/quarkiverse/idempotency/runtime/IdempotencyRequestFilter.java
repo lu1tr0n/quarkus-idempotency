@@ -18,6 +18,7 @@ import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
 import io.quarkiverse.httpproblem.HttpProblem;
+import io.quarkiverse.idempotency.runtime.metrics.IdempotencyMetrics;
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.Reservation;
 import io.quarkiverse.idempotency.runtime.spi.StoredEntry;
@@ -75,6 +76,9 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
     @Inject
     CurrentVertxRequest currentRequest;
 
+    @Inject
+    IdempotencyMetrics metrics;
+
     @Override
     public void filter(ContainerRequestContext requestContext) {
         if (!config.enabled() || !config.methods().contains(requestContext.getMethod())) {
@@ -91,9 +95,10 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
         }
 
         String key = unquote(rawKey.trim());
-        if (key.isEmpty() || key.length() > config.maxKeyLength() || hasControlChars(key)) {
+        if (key.isEmpty() || key.length() > config.maxKeyLength() || hasInvalidChars(key)) {
             throw problem(400, "idempotency-key-invalid", "Invalid Idempotency-Key",
-                    "The " + config.headerName() + " header is empty, too long, or contains control characters.");
+                    "The " + config.headerName() + " header is empty, too long, or contains characters "
+                            + "outside printable US-ASCII (0x20-0x7E).");
         }
 
         String principal = principalName(requestContext.getSecurityContext());
@@ -156,19 +161,23 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
                 rc.put(KEY_ATTR, storageKey);
                 rc.put(FINGERPRINT_ATTR, fingerprint);
             }
+            metrics.onFresh();
             return null;
         }
         StoredEntry entry = ((Reservation.Existing) reservation).entry();
         if (config.fingerprintEnabled() && !entry.fingerprint().equals(fingerprint)) {
+            metrics.onMismatch();
             throw problem(UNPROCESSABLE_ENTITY, "idempotency-key-mismatch",
                     "Idempotency-Key reused with a different payload",
                     "The " + config.headerName() + " was already used for a request with a different "
                             + "method, path, query, or body.");
         }
         if (entry.inFlight()) {
+            metrics.onConflict();
             throw problem(409, "idempotency-key-conflict", "Request already in progress",
                     "A request with this " + config.headerName() + " is still being processed.");
         }
+        metrics.onReplay();
         return buildReplay(entry.response());
     }
 
@@ -238,10 +247,15 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
         return base + (base.contains("#") ? "-" : "#") + slug;
     }
 
-    private static boolean hasControlChars(String value) {
+    /**
+     * Rejects keys that are not an RFC 8941 sf-string: the value must be printable US-ASCII
+     * ({@code 0x20}–{@code 0x7E}). Control characters and any non-ASCII byte ({@code >= 0x7F}) are
+     * rejected, since the {@code Idempotency-Key} draft defines the value as an sf-string.
+     */
+    private static boolean hasInvalidChars(String value) {
         for (int i = 0; i < value.length(); i++) {
             char c = value.charAt(i);
-            if (c < 0x20 || c == 0x7F) {
+            if (c < 0x20 || c > 0x7E) {
                 return true;
             }
         }

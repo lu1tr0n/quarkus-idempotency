@@ -55,12 +55,20 @@ class IdempotencyProcessor {
     void beans(BuildProducer<AdditionalBeanBuildItem> beans) {
         AdditionalBeanBuildItem.Builder builder = AdditionalBeanBuildItem.builder()
                 .addBeanClass(IdempotencyStartup.class)
-                .addBeanClass(InMemoryIdempotencyStore.class);
+                .addBeanClass(InMemoryIdempotencyStore.class)
+                // Default no-op metrics; replaced by the Micrometer-backed bean when present.
+                .addBeanClass("io.quarkiverse.idempotency.runtime.metrics.NoopIdempotencyMetrics");
 
         // Register the Redis store only when the redis client is on the classpath, by class name so
         // this processor never loads the redis-dependent class when redis is absent.
         if (isPresent("io.quarkus.redis.datasource.RedisDataSource")) {
             builder.addBeanClass("io.quarkiverse.idempotency.runtime.store.RedisIdempotencyStore");
+        }
+
+        // Register the Micrometer-backed metrics only when Micrometer is on the classpath, by class
+        // name so the micrometer-dependent class is never loaded when micrometer is absent.
+        if (isPresent("io.micrometer.core.instrument.MeterRegistry")) {
+            builder.addBeanClass("io.quarkiverse.idempotency.runtime.metrics.MicrometerIdempotencyMetrics");
         }
 
         beans.produce(builder.build());
