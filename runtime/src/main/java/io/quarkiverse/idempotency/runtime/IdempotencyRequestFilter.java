@@ -70,6 +70,13 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
     static final String HANDLED_ATTR = "io.quarkiverse.idempotency.handled";
     /** RoutingContext attribute holding the effective response TTL (may be overridden per method). */
     static final String TTL_ATTR = "io.quarkiverse.idempotency.ttl";
+    /**
+     * {@link ContainerRequestContext} property holding the {@link RoutingContext} captured while the
+     * CDI request scope is still active. The response filter reads it from here instead of resolving
+     * the {@code @RequestScoped CurrentVertxRequest} proxy, which is not active when the response
+     * filter runs after an asynchronous (suspend/resume) store path under concurrency.
+     */
+    static final String RC_ATTR = "io.quarkiverse.idempotency.routingContext";
 
     private static final Logger LOG = Logger.getLogger(IdempotencyRequestFilter.class);
 
@@ -132,9 +139,12 @@ public class IdempotencyRequestFilter implements ContainerRequestFilter {
         registerStreamingSafetyNet(rc);
         if (rc != null) {
             rc.put(TTL_ATTR, effectiveTtl(policy));
+            // Capture the RoutingContext now (request scope is active here) so the response filter
+            // can read it without resolving the @RequestScoped proxy after an async resume.
+            requestContext.setProperty(RC_ATTR, rc);
         }
 
-        // Asynchronous store lookup: suspend the request and resume on the reactive result.
+        // Asynchronous store lookup: suspend the request and resume on the reactive store result.
         ResteasyReactiveContainerRequestContext rrCtx = (ResteasyReactiveContainerRequestContext) requestContext;
         rrCtx.suspend();
         store.get().acquire(storageKey, fingerprint, config.lockTtl()).subscribe().with(

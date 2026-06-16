@@ -22,7 +22,6 @@ import org.jboss.logging.Logger;
 import io.quarkiverse.idempotency.runtime.metrics.IdempotencyMetrics;
 import io.quarkiverse.idempotency.runtime.spi.IdempotencyStore;
 import io.quarkiverse.idempotency.runtime.spi.StoredResponse;
-import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.smallrye.mutiny.Uni;
 import io.vertx.ext.web.RoutingContext;
 
@@ -66,14 +65,15 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
     Instance<IdempotencyStore> store;
 
     @Inject
-    CurrentVertxRequest currentRequest;
-
-    @Inject
     IdempotencyMetrics metrics;
 
     @Override
     public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
-        RoutingContext rc = currentRequest.getCurrent();
+        // Read the RoutingContext the request filter captured while the request scope was active.
+        // Resolving the @RequestScoped CurrentVertxRequest proxy here is unsafe: on an asynchronous
+        // (suspend/resume) store path under concurrency the scope is no longer active and the proxy
+        // throws ContextNotActiveException, turning every affected response into a 500.
+        RoutingContext rc = (RoutingContext) requestContext.getProperty(IdempotencyRequestFilter.RC_ATTR);
         if (rc == null) {
             return;
         }
