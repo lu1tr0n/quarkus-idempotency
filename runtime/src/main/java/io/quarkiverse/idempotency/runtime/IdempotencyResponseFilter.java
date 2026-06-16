@@ -1,6 +1,7 @@
 package io.quarkiverse.idempotency.runtime;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -112,9 +113,11 @@ public class IdempotencyResponseFilter implements ContainerResponseFilter {
                 ? responseContext.getMediaType().toString()
                 : null;
 
+        Object ttlAttr = rc.get(IdempotencyRequestFilter.TTL_ATTR);
+        Duration ttl = ttlAttr instanceof Duration d ? d : config.responseTtl();
         fireComplete(key, store.get().complete(key, fingerprint,
                 new StoredResponse(status, headers, responseContext.getEntity(), mediaType),
-                config.responseTtl()));
+                ttl));
     }
 
     /**

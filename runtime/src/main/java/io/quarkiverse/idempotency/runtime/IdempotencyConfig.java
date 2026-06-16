@@ -44,6 +44,29 @@ public interface IdempotencyConfig {
     List<String> methods();
 
     /**
+     * How endpoints are selected for idempotency.
+     *
+     * <ul>
+     * <li>{@code all-methods} (default): every request using a guarded {@link #methods()} is handled;
+     * an {@link Idempotent} annotation can opt individual endpoints in or out.</li>
+     * <li>{@code annotated}: only endpoints carrying {@link Idempotent} are handled, regardless of
+     * HTTP method.</li>
+     * </ul>
+     *
+     * @return the endpoint selection strategy
+     */
+    @WithDefault("all-methods")
+    Strategy strategy();
+
+    /** Endpoint selection strategy for {@link #strategy()}. */
+    enum Strategy {
+        /** Guard every request using a method in {@link IdempotencyConfig#methods()}. */
+        ALL_METHODS,
+        /** Guard only endpoints annotated with {@link Idempotent}. */
+        ANNOTATED
+    }
+
+    /**
      * Whether a guarded request MUST carry the key header. When {@code true}, a matching request
      * without a valid key is rejected with HTTP 400.
      *

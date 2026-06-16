@@ -1,6 +1,16 @@
 package io.quarkiverse.idempotency.deployment;
 
+import java.time.temporal.ChronoUnit;
+
+import org.jboss.jandex.AnnotationInstance;
+import org.jboss.jandex.AnnotationTarget;
+import org.jboss.jandex.AnnotationValue;
+import org.jboss.jandex.DotName;
+import org.jboss.jandex.MethodInfo;
+
+import io.quarkiverse.idempotency.runtime.Idempotent;
 import io.quarkiverse.idempotency.runtime.IdempotencyConfig;
+import io.quarkiverse.idempotency.runtime.IdempotencyRecorder;
 import io.quarkiverse.idempotency.runtime.IdempotencyRequestFilter;
 import io.quarkiverse.idempotency.runtime.IdempotencyResponseFilter;
 import io.quarkiverse.idempotency.runtime.IdempotencyStartup;
@@ -8,6 +18,9 @@ import io.quarkiverse.idempotency.runtime.store.InMemoryIdempotencyStore;
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
+import io.quarkus.deployment.annotations.ExecutionTime;
+import io.quarkus.deployment.annotations.Record;
+import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
 import io.quarkus.deployment.builditem.ConfigMappingBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.resteasy.reactive.spi.ContainerRequestFilterBuildItem;
@@ -72,6 +85,43 @@ class IdempotencyProcessor {
         }
 
         beans.produce(builder.build());
+    }
+
+    /**
+     * Discover {@link Idempotent} on resource methods and classes at build time and record each
+     * resolved policy into the runtime registry. Build-time discovery (not runtime annotation
+     * reflection) keeps this native-image safe.
+     */
+    @BuildStep
+    @Record(ExecutionTime.STATIC_INIT)
+    void registerIdempotentEndpoints(CombinedIndexBuildItem index, IdempotencyRecorder recorder) {
+        DotName annotation = DotName.createSimple(Idempotent.class.getName());
+        for (AnnotationInstance instance : index.getIndex().getAnnotations(annotation)) {
+            boolean enabled = boolValue(instance.value("enabled"), true);
+            Idempotent.Require requireKey = instance.value("requireKey") == null
+                    ? Idempotent.Require.DEFAULT
+                    : Idempotent.Require.valueOf(instance.value("requireKey").asEnum());
+            long ttl = instance.value("ttl") == null ? -1L : instance.value("ttl").asLong();
+            ChronoUnit unit = instance.value("ttlUnit") == null
+                    ? ChronoUnit.SECONDS
+                    : ChronoUnit.valueOf(instance.value("ttlUnit").asEnum());
+            // ChronoUnit#getDuration is exact for SECONDS..DAYS and estimated above that — fine for a TTL,
+            // and avoids Duration.of throwing on estimated units.
+            long ttlMillis = ttl > 0 ? unit.getDuration().multipliedBy(ttl).toMillis() : -1L;
+
+            AnnotationTarget target = instance.target();
+            if (target.kind() == AnnotationTarget.Kind.METHOD) {
+                MethodInfo method = target.asMethod();
+                recorder.registerMethod(method.declaringClass().name().toString(), method.name(),
+                        method.parametersCount(), enabled, requireKey, ttlMillis);
+            } else if (target.kind() == AnnotationTarget.Kind.CLASS) {
+                recorder.registerClass(target.asClass().name().toString(), enabled, requireKey, ttlMillis);
+            }
+        }
+    }
+
+    private static boolean boolValue(AnnotationValue value, boolean defaultValue) {
+        return value == null ? defaultValue : value.asBoolean();
     }
 
     private static boolean isPresent(String className) {

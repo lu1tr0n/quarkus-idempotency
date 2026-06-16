@@ -43,6 +43,22 @@ class IdempotencyTest {
     }
 
     @Test
+    void annotatedGetIsOptedInAndReplays() {
+        // GET is not a globally guarded method; @Idempotent opts it in. Proves build-time annotation
+        // discovery + the method registry + ResourceInfo resolution work in the native image.
+        String first = given().header(new Header("Idempotency-Key", "it-rep"))
+                .when().get("/payments/report")
+                .then().statusCode(200).header("Idempotent-Replayed", nullValue())
+                .extract().asString();
+
+        given().header(new Header("Idempotency-Key", "it-rep"))
+                .when().get("/payments/report")
+                .then().statusCode(200)
+                .header("Idempotent-Replayed", equalTo("true"))
+                .body(equalTo(first));
+    }
+
+    @Test
     void differentPayloadSameKeyRejected() {
         given().header(new Header("Idempotency-Key", "it-2"))
                 .contentType("application/json").body("{\"amount\":1}")

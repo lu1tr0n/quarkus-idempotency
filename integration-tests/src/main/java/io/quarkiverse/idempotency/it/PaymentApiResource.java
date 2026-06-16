@@ -10,6 +10,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import io.quarkiverse.idempotency.runtime.Idempotent;
+
 /**
  * A non-idempotent "charge" operation whose side effect is counted, so the tests can prove the
  * handler runs exactly once across retries with the same idempotency key.
@@ -18,6 +20,7 @@ import jakarta.ws.rs.core.Response;
 public class PaymentApiResource {
 
     private static final AtomicInteger CHARGES = new AtomicInteger();
+    private static final AtomicInteger REPORTS = new AtomicInteger();
 
     @POST
     @Path("/charge")
@@ -36,5 +39,14 @@ public class PaymentApiResource {
     @Produces(MediaType.TEXT_PLAIN)
     public int count() {
         return CHARGES.get();
+    }
+
+    /** GET is not globally guarded; {@code @Idempotent} opts it in — verifies the annotation in native. */
+    @GET
+    @Path("/report")
+    @Idempotent
+    @Produces(MediaType.TEXT_PLAIN)
+    public String report() {
+        return "report#" + REPORTS.incrementAndGet();
     }
 }
